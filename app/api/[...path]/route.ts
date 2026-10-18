@@ -62,7 +62,7 @@ async function handle(req:Request){try{
  const readiness=[];for(const m of letters){const files=await env.BUCKET!.list({prefix:'media/'+m+'/'});readiness.push({material:m,video:files.objects.some(o=>o.key.endsWith('/video.mp4')),images:files.objects.filter(o=>/\.jpg$/.test(o.key)).length})}
  const submissions=(await env.DB!.prepare('SELECT expert_id,submitted_at,is_current FROM submissions').all()).results as any[];
  const withStatus=(rows:any[])=>rows.map(row=>{const overall=submissions.find(s=>s.expert_id===(row.expert_id||row.id));return {...row,overall_submitted:overall?.is_current===1,overall_submitted_at:overall?.submitted_at||null}});
- return reply({experts:withStatus(experts),reviews:withStatus(reviews),trialExperts:withStatus(trialExperts),trialReviews:withStatus(trialReviews),readiness,slotLabels,publicMode:false})
+ return reply({experts:withStatus(experts),reviews:withStatus(reviews),trialExperts:withStatus(trialExperts),trialReviews:withStatus(trialReviews),readiness,mediaProxy:!!process.env.MEDIA_ORIGIN,slotLabels,publicMode:false})
  }
  if(path==='admin/review'&&method==='POST'){
  const b=await req.json() as any;if(typeof b.id!=='string'||!validReview(b))return reply({error:'请完整填写五项评分和评语'},400);
