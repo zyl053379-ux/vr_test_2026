@@ -1,7 +1,27 @@
-# VR Expert Review
+# VR作品专家评价
 
-Source snapshot for migration. NOT Vercel-ready.
+## 当前迁移状态
+采用 Next.js + Neon PostgreSQL + Vercel 私有 Blob。网页入口、研究者后台、五份材料评价、总提交与导出保留。
 
-Current backend requires Cloudflare D1 and R2. Port runtime, database and media storage before Vercel deployment. Server-side expert entrance password is still pending; configure it in deployment environment, never in source.
+入口由服务器验证：ENTRY_PASSWORD 设置专家入口密码；AUTH_SECRET 是随机签名密钥；ADMIN_KEY 是独立研究者密码。这些值仅保存在部署环境，不提交到 GitHub。
 
-This archive excludes research answers, backups, media uploads, runtime secrets and original Git history.
+## 首次配置
+1. 在 Vercel 导入本仓库，框架选择 Next.js，Node.js 22。
+2. 通过 Storage/Marketplace 将 Neon 数据库连接项目，确保 DATABASE_URL 已注入。
+3. 建立 private Blob 并连接项目，确保 BLOB_READ_WRITE_TOKEN 已注入。
+4. 在服务器环境配置 ENTRY_PASSWORD、AUTH_SECRET、ADMIN_KEY、PUBLIC_COLLAB=true。
+5. 将环境变量拉取到被忽略的 .env.local。运行 npm run db:migrate，仅新增表，不删除已有记录。请勿把密钥或 .env.local 上传仓库。
+6. 在研究者后台上传 A—E 各1个MP4、16张JPG、1份PDF，再检查就绪状态。
+7. 使用 /?test=1 试填；正式入口为 /，研究者入口为 /research。所有页面/API/材料均需要先通过入口验证；研究者功能还需要独立管理权限。
+
+## 运行与核验
+npm install
+npm run build
+npm run test:gate
+
+数据库初始化脚本需要有效的数据库配置。部署成功不等于国内网络已验证：正式邀请前应在实际网络中完成视频播放、登记、保存、总提交和后台核对。
+
+## 数据含义
+单份保存不等于整份提交。后台汇总仅包含已点击“提交全部评价”的最新答卷；修改保存后须重新总提交。试填数据单独统计。
+
+源代码不含视频、图片、答卷、测试备份或部署密钥。原 Cloudflare 网站的数据不会自动复制到 Neon。

@@ -28,8 +28,7 @@
       ]
     },
     "types": [
-      "node",
-      "@cloudflare/workers-types"
+      "node"
     ]
   },
   "include": [
@@ -42,6 +41,12 @@
   ],
   "exclude": [
     "node_modules",
-    "examples"
+    "build",
+    "examples",
+    "db",
+    "drizzle",
+    "vite.config.ts",
+    "drizzle.config.ts",
+    "tests"
   ]
 }

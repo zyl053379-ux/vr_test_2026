@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS experts(id text PRIMARY KEY,token_hash text NOT NULL UNIQUE,label text NOT NULL UNIQUE,sequence text NOT NULL,created_at text NOT NULL);
+CREATE TABLE IF NOT EXISTS profiles(expert_id text PRIMARY KEY REFERENCES experts(id),data text NOT NULL,updated_at text NOT NULL);
+CREATE TABLE IF NOT EXISTS panel_slots(label text PRIMARY KEY CHECK(label IN ('E01','E02','E03','E04','E05')),expert_id text NOT NULL UNIQUE REFERENCES experts(id),created_at text NOT NULL);
+CREATE TABLE IF NOT EXISTS reviews(id text PRIMARY KEY,expert_id text NOT NULL REFERENCES experts(id),material text NOT NULL CHECK(material IN ('A','B','C','D','E')),scores text NOT NULL,comments text NOT NULL,extra text NOT NULL,submitted_at text NOT NULL,watched integer NOT NULL,UNIQUE(expert_id,material));
+CREATE TABLE IF NOT EXISTS submissions(expert_id text PRIMARY KEY REFERENCES experts(id),submitted_at text NOT NULL,snapshot text NOT NULL,is_current integer NOT NULL DEFAULT 1);
