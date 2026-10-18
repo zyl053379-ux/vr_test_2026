@@ -1,5 +1,6 @@
 import {env} from '../../../lib/runtime';
 import {serveMedia} from '../../../lib/media';
+import {postgresSchema} from '../../../lib/schema';
 export const runtime='nodejs';
 import { rubric } from '../../rubric';
 import {validProfile,profileFields} from '../../profile-fields';
@@ -39,6 +40,10 @@ async function handle(req:Request){try{
  if(path==='logout'&&method==='POST'){const r=reply({ok:true});r.headers.append('Set-Cookie','vr_expert=; Path=/; Max-Age=0');r.headers.append('Set-Cookie','vr_trial=; Path=/; Max-Age=0');r.headers.append('Set-Cookie','vr_admin=; Path=/; Max-Age=0');return r}
  if(path.startsWith('admin')){
  if(!await admin(req))return reply({error:'请先输入管理访问码'},401);
+ if(path==='admin/setup'&&method==='POST'){
+ const b=await req.json() as any;if(b.confirm!=='INITIALIZE_SCHEMA')return reply({error:'初始化确认不匹配'},400);
+ await env.DB.batch(postgresSchema.split(';').map(s=>s.trim()).filter(Boolean).map(s=>env.DB.prepare(s)));return reply({ok:true})
+ }
  if(path==='admin/data-snapshot'&&method==='GET'){
  const tables=['experts','profiles','panel_slots','reviews','submissions'],data:any={};
  for(const table of tables)data[table]=(await env.DB!.prepare('SELECT * FROM '+table+' ORDER BY 1').all()).results;
