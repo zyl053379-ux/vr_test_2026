@@ -15,15 +15,6 @@ async function admin(req:Request){return adminToken(req.headers.get('authorizati
 const trial=(req:Request)=>new URL(req.url).searchParams.get('test')==='1';
 async function nextLabel(prefix:string){const row=await env.DB!.prepare("SELECT COALESCE(MAX(CAST(substr(label,2) AS INTEGER)),0) n FROM experts WHERE label ~ ?").bind('^'+prefix+'[0-9]+$').first<any>();return prefix+String(Number(row.n)+1).padStart(2,'0')}
 const slotLabels=['E01','E02','E03','E04','E05'];
-async function expert(req:Request){
- const testMode=trial(req),cookieName=testMode?'vr_trial':'vr_expert',c=cookie(req,cookieName);
- if(c){const e=await env.DB!.prepare('SELECT e.id,e.label,e.sequence,s.label AS panel_label FROM experts e LEFT JOIN panel_slots s ON s.expert_id=e.id WHERE e.token_hash=?').bind(await sha(c)).first<any>();if(e)return {...e,label:testMode?e.label:(e.panel_label||'待分配'),needsEnrollment:!testMode&&!e.panel_label,cookieName,testMode}}
- if(!testMode)return {id:null,label:'待分配',sequence:'[]',needsEnrollment:true,cookieName,testMode:false};
- if(!publicMode())return null;
- const id=crypto.randomUUID(),newToken=crypto.randomUUID()+crypto.randomUUID(),sequence=JSON.stringify(letters);
- for(let i=0;i<8;i++){try{const label=await nextLabel('T');await env.DB!.prepare('INSERT INTO experts(id,token_hash,label,sequence,created_at) VALUES(?,?,?,?,?)').bind(id,await sha(newToken),label,sequence,new Date().toISOString()).run();return {id,label,sequence,newToken,cookieName,testMode:true,needsEnrollment:false}}catch(error){if(!/unique|duplicate key|23505/i.test(String(error))||i===7)throw error}}
- return null
-}
 
 const validReview=(b:any)=>Array.isArray(b.scores)&&b.scores.length===5&&b.scores.every((s:any)=>s==='NA'||(Number.isInteger(s)&&s>=1&&s<=5))&&Array.isArray(b.comments)&&b.comments.length===5&&b.comments.every((s:any)=>typeof s==='string'&&s.trim().length>0&&s.length<=6000)&&typeof b.extra==='string'&&b.extra.length<=6000;
 const validKey=(s:string)=>/^media\/[A-E]\/(video\.mp4|(?:[1-9]|1[0-6])\.jpg|说明\.pdf)$/.test(s);
@@ -43,6 +34,12 @@ async function handle(req:Request){try{
  if(path==='admin/setup'&&method==='POST'){
  const b=await req.json() as any;if(b.confirm!=='INITIALIZE_SCHEMA')return reply({error:'初始化确认不匹配'},400);
  await env.DB.batch(postgresSchema.split(';').map(s=>s.trim()).filter(Boolean).map(s=>env.DB.prepare(s)));return reply({ok:true})
+ }
+ if(path==='admin/discard-unsubmitted'&&method==='POST'){
+ const b=await req.json() as any;if(b.confirm!=='DISCARD_UNSUBMITTED'||!Array.isArray(b.ids)||!b.ids.length||b.ids.length>100||!b.ids.every((id:any)=>typeof id==='string'))return reply({error:'清理参数不正确'},400);
+ const placeholders=b.ids.map(()=>'?').join(','),eligible='SELECT e.id FROM experts e WHERE e.id IN ('+placeholders+') AND NOT EXISTS(SELECT 1 FROM submissions s WHERE s.expert_id=e.id)';
+ const ops=['reviews','profiles','panel_slots'].map(table=>env.DB.prepare('DELETE FROM '+table+' WHERE expert_id IN ('+eligible+')').bind(...b.ids));
+ ops.push(env.DB.prepare('DELETE FROM experts WHERE id IN ('+eligible+')').bind(...b.ids));await env.DB.batch(ops);return reply({ok:true})
  }
  if(path==='admin/data-snapshot'&&method==='GET'){
  const tables=['experts','profiles','panel_slots','reviews','submissions'],data:any={};
@@ -72,7 +69,7 @@ async function handle(req:Request){try{
  if(path==='admin/review'&&method==='POST'){
  const b=await req.json() as any;if(typeof b.id!=='string'||!validReview(b))return reply({error:'请完整填写五项评分和评语'},400);
  const record=await env.DB!.prepare('SELECT expert_id FROM reviews WHERE id=?').bind(b.id).first<any>();if(!record)return reply({error:'评价不存在'},404);
- await env.DB!.batch([env.DB!.prepare('UPDATE reviews SET scores=?,comments=?,extra=?,submitted_at=? WHERE id=?').bind(JSON.stringify(b.scores),JSON.stringify(b.comments.map((s:string)=>s.trim())),b.extra,new Date().toISOString(),b.id),env.DB!.prepare('UPDATE submissions SET is_current=0 WHERE expert_id=?').bind(record.expert_id)]);return reply({ok:true})
+ await env.DB!.batch([env.DB!.prepare('UPDATE reviews SET scores=?,comments=?,extra=?,submitted_at=? WHERE id=?').bind(JSON.stringify(b.scores),JSON.stringify(b.comments.map((s:string)=>s.trim())),b.extra,new Date().toISOString(),b.id)]);return reply({ok:true})
  }
  if(path==='admin/invite'&&method==='POST'){await req.json();return reply({error:'已改为固定5位专家。请发送统一专家链接，，登记时自动分配E01—E05编号。'},409)}
  if(path==='admin/export'&&method==='GET'){
@@ -93,62 +90,28 @@ async function handle(req:Request){try{
  return reply({error:'没有此操作'},404)
  }
  if(path.startsWith('media/')&&method==='GET')return serveMedia(req,path);
- const e=await expert(req);if(!e)return reply({error:'请通过研究者提供的专属链接进入'},401);
- if(path==='session'&&method==='GET'){
- const profile=e.id?await env.DB!.prepare('SELECT data FROM profiles WHERE expert_id=?').bind(e.id).first<any>():null;
- const occupied=(await env.DB!.prepare('SELECT label,expert_id FROM panel_slots').all()).results as any[];
- const availableSlots=slotLabels.map(label=>({label,available:!occupied.some(s=>s.label===label&&s.expert_id!==e.id)}));
- const reviews=e.id?(await env.DB!.prepare('SELECT material,scores,comments,extra,submitted_at FROM reviews WHERE expert_id=?').bind(e.id).all()).results:[];
- const submission=e.id?await env.DB!.prepare('SELECT submitted_at,is_current FROM submissions WHERE expert_id=?').bind(e.id).first():null;
- const r=reply({draftKey:e.id,submission,label:e.label,publicMode:false,testMode:e.testMode,needsEnrollment:!!e.needsEnrollment,availableSlots,profile:profile?JSON.parse(profile.data):null,sequence:JSON.parse(e.sequence),reviews});
- if(e.newToken)r.headers.set('Set-Cookie',e.cookieName+'='+e.newToken+'; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000'+(new URL(req.url).protocol==='https:'?'; Secure':''));return r
- }
- if(path==='enroll'&&method==='POST'){
- const b=await req.json() as any;if(!validProfile(b.profile)||e.testMode)return reply({error:'请完成三项专业背景信息'},400);
- const id=e.id||crypto.randomUUID(),newToken=e.id?null:crypto.randomUUID()+crypto.randomUUID(),now=new Date().toISOString();
- const p=b.profile,profile={areas:p.areas,otherArea:p.areas.includes('其他相关领域')?p.otherArea.trim():'',...Object.fromEntries(profileFields.map(f=>[f.key,p[f.key]]))};
- for(let attempt=0;attempt<8;attempt++){
- const bound=await env.DB!.prepare('SELECT label FROM panel_slots WHERE expert_id=?').bind(id).first<any>();
- const occupied=(await env.DB!.prepare('SELECT label FROM panel_slots').all()).results as any[];
- const label=bound?.label||slotLabels.find(label=>!occupied.some(s=>s.label===label));
- if(!label)return reply({error:'5个正式专家名额已登记完毕。若您已登记，请用原浏览器继续；研究者试填请使用试填链接。'},409);
- const index=slotLabels.indexOf(label),sequence=JSON.stringify([...letters.slice(index),...letters.slice(0,index)]);
- const ops=[];if(!e.id&&!bound)ops.push(env.DB!.prepare('INSERT INTO experts(id,token_hash,label,sequence,created_at) VALUES(?,?,?,?,?)').bind(id,await sha(newToken!),'panel-'+id,sequence,now));
- if(!bound)ops.push(env.DB!.prepare('INSERT INTO panel_slots(label,expert_id,created_at) VALUES(?,?,?)').bind(label,id,now));
- ops.push(env.DB!.prepare('UPDATE experts SET sequence=? WHERE id=?').bind(sequence,id));
- ops.push(env.DB!.prepare('INSERT INTO profiles(expert_id,data,updated_at) VALUES(?,?,?) ON CONFLICT(expert_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at').bind(id,JSON.stringify(profile),now));
- try{await env.DB!.batch(ops)}catch(error){if(/unique|duplicate key|23505/i.test(String(error)))continue;throw error}
- const r=reply({ok:true,label});if(newToken)r.headers.set('Set-Cookie','vr_expert='+newToken+'; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000'+(new URL(req.url).protocol==='https:'?'; Secure':''));return r
- }
- return reply({error:'登记人数较多，请稍后再次提交，您的填写内容会保留。'},409)
- }
+ if(path==='session'&&method==='GET')return reply({label:'本次评价',testMode:trial(req),needsEnrollment:false,availableSlots:[],profile:null,reviews:[],submission:null,sequence:letters});
+ if(['enroll','profile','review'].includes(path)&&method==='POST'){await req.json();return reply({error:'填写仅暂存在页面，请使用“提交全部评价”统一提交'},409)}
  if(path==='finalize'&&method==='POST'){
- const b=await req.json() as any;if(!e.id||e.needsEnrollment)return reply({error:'请先完成专家信息登记'},409);
- const p=await env.DB!.prepare('SELECT data FROM profiles WHERE expert_id=?').bind(e.id).first<any>();if(!p||!validProfile(JSON.parse(p.data)))return reply({error:'请先完成专业背景信息'},409);
- const stored=(await env.DB!.prepare('SELECT material,scores,comments,extra,watched FROM reviews WHERE expert_id=?').bind(e.id).all()).results as any[];
- const values=Array.isArray(b.reviews)?b.reviews:stored.map(r=>({...r,scores:JSON.parse(r.scores),comments:JSON.parse(r.comments),watched:r.watched===1}));
- const missing=letters.filter(m=>!values.some((r:any)=>r.material===m&&validReview(r)&&r.watched===true));
- if(values.length!==5||new Set(values.map((r:any)=>r.material)).size!==5||missing.length)return reply({error:'请先完整填写并确认材料'+(missing.length?missing.join('、'):'A—E')+'的评价'},400);
- const rows=letters.map(material=>{const r=values.find((r:any)=>r.material===material);return {material,scores:r.scores,comments:r.comments.map((t:string)=>t.trim()),extra:r.extra,watched:true}}),time=new Date().toISOString();
- const ops=rows.map(r=>env.DB!.prepare('INSERT INTO reviews(id,expert_id,material,scores,comments,extra,submitted_at,watched) VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(expert_id,material) DO UPDATE SET scores=excluded.scores,comments=excluded.comments,extra=excluded.extra,submitted_at=excluded.submitted_at').bind(crypto.randomUUID(),e.id,r.material,JSON.stringify(r.scores),JSON.stringify(r.comments),r.extra,time));
- ops.push(env.DB!.prepare('INSERT INTO submissions(expert_id,submitted_at,snapshot,is_current) VALUES(?,?,?,1) ON CONFLICT(expert_id) DO UPDATE SET submitted_at=excluded.submitted_at,snapshot=excluded.snapshot,is_current=1').bind(e.id,time,JSON.stringify({profile:JSON.parse(p.data),reviews:rows})));
- await env.DB!.batch(ops);return reply({ok:true,submittedAt:time})
+ const b=await req.json() as any;if(!validProfile(b.profile)||typeof b.submissionKey!=='string'||!/^[0-9a-f-]{72}$/i.test(b.submissionKey))return reply({error:'请填写专业背景后完成全部评价'},400);
+ if(!Array.isArray(b.reviews)||b.reviews.length!==5||new Set(b.reviews.map((r:any)=>r.material)).size!==5||!letters.every(m=>b.reviews.some((r:any)=>r.material===m&&validReview(r)&&r.watched===true)))return reply({error:'请完整填写五份材料，并确认已查看全部材料后再提交'},400);
+ const tokenHash=await sha(b.submissionKey),testMode=trial(req),p=b.profile,profile={areas:p.areas,otherArea:p.areas.includes('其他相关领域')?p.otherArea.trim():'',...Object.fromEntries(profileFields.map(f=>[f.key,p[f.key]]))};
+ const sequence=Array.isArray(b.sequence)&&b.sequence.length===5&&new Set(b.sequence).size===5&&b.sequence.every((m:any)=>letters.includes(m))?b.sequence:letters;
+ const rows=letters.map(material=>{const r=b.reviews.find((r:any)=>r.material===material);return {material,scores:r.scores,comments:r.comments.map((s:string)=>s.trim()),extra:r.extra,watched:true}});
+ for(let attempt=0;attempt<8;attempt++){
+ const existing=await env.DB.prepare('SELECT e.id,e.label,s.submitted_at,p.label AS panel_label FROM experts e JOIN submissions s ON s.expert_id=e.id LEFT JOIN panel_slots p ON p.expert_id=e.id WHERE token_hash=?').bind(tokenHash).first<any>();
+ if(existing)return reply({ok:true,label:existing.panel_label||existing.label,submittedAt:existing.submitted_at});
+ const occupied=(await env.DB.prepare('SELECT label FROM panel_slots').all()).results as any[],label=testMode?await nextLabel('T'):slotLabels.find(label=>!occupied.some(s=>s.label===label));
+ if(!label)return reply({error:'本轮五份正式专家答卷已收齐，请联系研究者'},409);
+ const id=crypto.randomUUID(),time=new Date().toISOString(),ops=[env.DB.prepare('INSERT INTO experts(id,token_hash,label,sequence,created_at) VALUES(?,?,?,?,?)').bind(id,tokenHash,testMode?label:'panel-'+id,JSON.stringify(sequence),time)];
+ if(!testMode)ops.push(env.DB.prepare('INSERT INTO panel_slots(label,expert_id,created_at) VALUES(?,?,?)').bind(label,id,time));
+ ops.push(env.DB.prepare('INSERT INTO profiles(expert_id,data,updated_at) VALUES(?,?,?)').bind(id,JSON.stringify(profile),time));
+ for(const row of rows)ops.push(env.DB.prepare('INSERT INTO reviews(id,expert_id,material,scores,comments,extra,submitted_at,watched) VALUES(?,?,?,?,?,?,?,1)').bind(crypto.randomUUID(),id,row.material,JSON.stringify(row.scores),JSON.stringify(row.comments),row.extra,time));
+ ops.push(env.DB.prepare('INSERT INTO submissions(expert_id,submitted_at,snapshot,is_current) VALUES(?,?,?,1)').bind(id,time,JSON.stringify({profile,reviews:rows})));
+ try{await env.DB.batch(ops);return reply({ok:true,label,submittedAt:time})}catch(error){if(/unique|duplicate key|23505/i.test(String(error)))continue;throw error}
  }
- if(path==='profile'&&method==='POST'){
- const p=await req.json() as any;if(!e.id||e.needsEnrollment)return reply({error:'请先登记专业背景信息'},409);if(!validProfile(p))return reply({error:'请完成专业背景选项，并检查填写内容'},400);
- const data={areas:p.areas,otherArea:p.areas.includes('其他相关领域')?p.otherArea.trim():'',...Object.fromEntries(profileFields.map(f=>[f.key,p[f.key]]))},json=JSON.stringify(data),time=new Date().toISOString();
- const previous=await env.DB!.prepare('SELECT data FROM profiles WHERE expert_id=?').bind(e.id).first<any>();
- const ops=[env.DB!.prepare('INSERT INTO profiles(expert_id,data,updated_at) VALUES(?,?,?) ON CONFLICT(expert_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at').bind(e.id,json,time)];
- if(previous?.data!==json)ops.push(env.DB!.prepare('UPDATE submissions SET is_current=0 WHERE expert_id=?').bind(e.id));
- await env.DB!.batch(ops);return reply({ok:true})
- }
- if(path==='review'&&method==='POST'){
- const b=await req.json() as any;
- if(!e.id||e.needsEnrollment)return reply({error:'请先完成专家信息登记'},409);
- if(!await env.DB!.prepare('SELECT expert_id FROM profiles WHERE expert_id=?').bind(e.id).first())return reply({error:'请先填写一次专业背景信息，再提交评价'},409);
- if(!letters.includes(b.material)||!Array.isArray(b.scores)||b.scores.length!==5||!b.scores.every((s:any)=>s==='NA'||(Number.isInteger(s)&&s>=1&&s<=5))||!Array.isArray(b.comments)||b.comments.length!==5||!b.comments.every((s:any)=>typeof s==='string'&&s.trim().length>0&&s.length<=6000)||typeof b.extra!=='string'||b.extra.length>6000||b.watched!==true)return reply({error:'请完成五项评分、五项评语，并确认已查看材料'},400);
- const time=new Date().toISOString();await env.DB!.batch([env.DB!.prepare('INSERT INTO reviews(id,expert_id,material,scores,comments,extra,submitted_at,watched) VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(expert_id,material) DO UPDATE SET scores=excluded.scores,comments=excluded.comments,extra=excluded.extra,submitted_at=excluded.submitted_at').bind(crypto.randomUUID(),e.id,b.material,JSON.stringify(b.scores),JSON.stringify(b.comments.map((s:string)=>s.trim())),b.extra,time),env.DB!.prepare('UPDATE submissions SET is_current=0 WHERE expert_id=?').bind(e.id)]);return reply({ok:true,submittedAt:time})
+ return reply({error:'提交人数较多，请稍后再次提交；当前页面内容仍保留'},409)
  }
  return reply({error:'没有此页面'},404)
- }catch(error){console.error('review request failed',error instanceof Error?error.message:'unknown');return reply({error:'服务暂时不可用，请稍后重试；您的本地草稿仍保留'},500)}}
+ }catch(error){console.error('review request failed',error instanceof Error?error.message:'unknown');return reply({error:'服务暂时不可用，请稍后重试；请保留当前页面，稍后重试'},500)}}
 export const GET=handle;export const POST=handle;export const PUT=handle;
