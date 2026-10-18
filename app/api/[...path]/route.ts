@@ -35,12 +35,6 @@ async function handle(req:Request){try{
  const b=await req.json() as any;if(b.confirm!=='INITIALIZE_SCHEMA')return reply({error:'初始化确认不匹配'},400);
  await env.DB.batch(postgresSchema.split(';').map(s=>s.trim()).filter(Boolean).map(s=>env.DB.prepare(s)));return reply({ok:true})
  }
- if(path==='admin/discard-unsubmitted'&&method==='POST'){
- const b=await req.json() as any;if(b.confirm!=='DISCARD_UNSUBMITTED'||!Array.isArray(b.ids)||!b.ids.length||b.ids.length>100||!b.ids.every((id:any)=>typeof id==='string'))return reply({error:'清理参数不正确'},400);
- const placeholders=b.ids.map(()=>'?').join(','),eligible='SELECT e.id FROM experts e WHERE e.id IN ('+placeholders+') AND NOT EXISTS(SELECT 1 FROM submissions s WHERE s.expert_id=e.id)';
- const ops=['reviews','profiles','panel_slots'].map(table=>env.DB.prepare('DELETE FROM '+table+' WHERE expert_id IN ('+eligible+')').bind(...b.ids));
- ops.push(env.DB.prepare('DELETE FROM experts WHERE id IN ('+eligible+')').bind(...b.ids));await env.DB.batch(ops);return reply({ok:true})
- }
  if(path==='admin/data-snapshot'&&method==='GET'){
  const tables=['experts','profiles','panel_slots','reviews','submissions'],data:any={};
  for(const table of tables)data[table]=(await env.DB!.prepare('SELECT * FROM '+table+' ORDER BY 1').all()).results;
@@ -57,10 +51,10 @@ async function handle(req:Request){try{
  await env.DB!.batch(ops);return reply({ok:true,deletedExperts:ids.length})
  }
  if(path==='admin'&&method==='GET'){
- const experts=(await env.DB!.prepare('SELECT e.id,s.label,e.sequence,e.created_at,p.data AS profile FROM panel_slots s JOIN experts e ON e.id=s.expert_id LEFT JOIN profiles p ON p.expert_id=e.id ORDER BY s.label').all()).results;
- const reviews=(await env.DB!.prepare('SELECT r.*,s.label,e.sequence FROM reviews r JOIN experts e ON e.id=r.expert_id JOIN panel_slots s ON s.expert_id=e.id ORDER BY submitted_at DESC').all()).results;
- const trialExperts=(await env.DB!.prepare("SELECT e.id,e.label,e.sequence,e.created_at,p.data AS profile FROM experts e LEFT JOIN profiles p ON p.expert_id=e.id WHERE e.label ~ '^T[0-9]+$' ORDER BY e.created_at").all()).results;
- const trialReviews=(await env.DB!.prepare("SELECT r.*,e.label,e.sequence FROM reviews r JOIN experts e ON e.id=r.expert_id WHERE e.label ~ '^T[0-9]+$' ORDER BY submitted_at DESC").all()).results;
+ const experts=(await env.DB!.prepare('SELECT e.id,s.label,e.sequence,e.created_at,p.data AS profile FROM panel_slots s JOIN experts e ON e.id=s.expert_id LEFT JOIN profiles p ON p.expert_id=e.id JOIN submissions complete ON complete.expert_id=e.id ORDER BY s.label').all()).results;
+ const reviews=(await env.DB!.prepare('SELECT r.*,s.label,e.sequence FROM reviews r JOIN experts e ON e.id=r.expert_id JOIN panel_slots s ON s.expert_id=e.id JOIN submissions complete ON complete.expert_id=e.id ORDER BY submitted_at DESC').all()).results;
+ const trialExperts=(await env.DB!.prepare("SELECT e.id,e.label,e.sequence,e.created_at,p.data AS profile FROM experts e LEFT JOIN profiles p ON p.expert_id=e.id WHERE e.label ~ '^T[0-9]+$' AND EXISTS(SELECT 1 FROM submissions complete WHERE complete.expert_id=e.id) ORDER BY e.created_at").all()).results;
+ const trialReviews=(await env.DB!.prepare("SELECT r.*,e.label,e.sequence FROM reviews r JOIN experts e ON e.id=r.expert_id WHERE e.label ~ '^T[0-9]+$' AND EXISTS(SELECT 1 FROM submissions complete WHERE complete.expert_id=e.id) ORDER BY submitted_at DESC").all()).results;
  const readiness=[];for(const m of letters){const files=await env.BUCKET!.list({prefix:'media/'+m+'/'});readiness.push({material:m,video:files.objects.some(o=>o.key.endsWith('/video.mp4')),images:files.objects.filter(o=>/\.jpg$/.test(o.key)).length})}
  const submissions=(await env.DB!.prepare('SELECT expert_id,submitted_at,is_current FROM submissions').all()).results as any[];
  const withStatus=(rows:any[])=>rows.map(row=>{const overall=submissions.find(s=>s.expert_id===(row.expert_id||row.id));return {...row,overall_submitted:overall?.is_current===1,overall_submitted_at:overall?.submitted_at||null}});
@@ -74,7 +68,7 @@ async function handle(req:Request){try{
  if(path==='admin/invite'&&method==='POST'){await req.json();return reply({error:'已改为固定5位专家。请发送统一专家链接，，登记时自动分配E01—E05编号。'},409)}
  if(path==='admin/export'&&method==='GET'){
  const isTrial=new URL(req.url).searchParams.get('scope')==='trial';
- const query=isTrial?"SELECT r.*,e.label,e.sequence,p.data AS profile FROM reviews r JOIN experts e ON e.id=r.expert_id LEFT JOIN profiles p ON p.expert_id=e.id WHERE e.label ~ '^T[0-9]+$' ORDER BY e.label,r.material":"SELECT r.*,s.label,e.sequence,p.data AS profile FROM reviews r JOIN experts e ON e.id=r.expert_id JOIN panel_slots s ON s.expert_id=e.id LEFT JOIN profiles p ON p.expert_id=e.id ORDER BY s.label,r.material";
+ const query=isTrial?"SELECT r.*,e.label,e.sequence,p.data AS profile FROM reviews r JOIN experts e ON e.id=r.expert_id LEFT JOIN profiles p ON p.expert_id=e.id WHERE e.label ~ '^T[0-9]+$' AND EXISTS(SELECT 1 FROM submissions complete WHERE complete.expert_id=e.id) ORDER BY e.label,r.material":"SELECT r.*,s.label,e.sequence,p.data AS profile FROM reviews r JOIN experts e ON e.id=r.expert_id JOIN panel_slots s ON s.expert_id=e.id LEFT JOIN profiles p ON p.expert_id=e.id JOIN submissions complete ON complete.expert_id=e.id ORDER BY s.label,r.material";
  const rows=(await env.DB!.prepare(query).all()).results as any[];
  const submissions=(await env.DB!.prepare('SELECT expert_id,submitted_at,is_current FROM submissions').all()).results as any[];
  const cell=(v:any)=>'"'+String(/^[=+\-@\t\r]/.test(String(v))?"'"+v:v).replaceAll('"','""')+'"';
@@ -101,14 +95,19 @@ async function handle(req:Request){try{
  for(let attempt=0;attempt<8;attempt++){
  const existing=await env.DB.prepare('SELECT e.id,e.label,s.submitted_at,p.label AS panel_label FROM experts e JOIN submissions s ON s.expert_id=e.id LEFT JOIN panel_slots p ON p.expert_id=e.id WHERE token_hash=?').bind(tokenHash).first<any>();
  if(existing)return reply({ok:true,label:existing.panel_label||existing.label,submittedAt:existing.submitted_at});
- const occupied=(await env.DB.prepare('SELECT label FROM panel_slots').all()).results as any[],label=testMode?await nextLabel('T'):slotLabels.find(label=>!occupied.some(s=>s.label===label));
+ const occupied=(await env.DB.prepare('SELECT p.label FROM panel_slots p JOIN submissions s ON s.expert_id=p.expert_id').all()).results as any[],label=testMode?await nextLabel('T'):slotLabels.find(label=>!occupied.some(s=>s.label===label));
  if(!label)return reply({error:'本轮五份正式专家答卷已收齐，请联系研究者'},409);
  const id=crypto.randomUUID(),time=new Date().toISOString(),ops=[env.DB.prepare('INSERT INTO experts(id,token_hash,label,sequence,created_at) VALUES(?,?,?,?,?)').bind(id,tokenHash,testMode?label:'panel-'+id,JSON.stringify(sequence),time)];
- if(!testMode)ops.push(env.DB.prepare('INSERT INTO panel_slots(label,expert_id,created_at) VALUES(?,?,?)').bind(label,id,time));
+ if(!testMode){
+ // Reassign slots held only by legacy incomplete registrations. Their expert/profile rows are preserved.
+ ops.push(env.DB.prepare('INSERT INTO panel_slots(label,expert_id,created_at) VALUES(?,?,?) ON CONFLICT(label) DO UPDATE SET expert_id=excluded.expert_id,created_at=excluded.created_at WHERE NOT EXISTS(SELECT 1 FROM submissions s WHERE s.expert_id=panel_slots.expert_id)').bind(label,id,time));
+ // Abort the complete transaction if a concurrent final submission claimed this slot first.
+ ops.push(env.DB.prepare('SELECT 1 / COUNT(*)::integer FROM panel_slots WHERE label=? AND expert_id=?').bind(label,id));
+ }
  ops.push(env.DB.prepare('INSERT INTO profiles(expert_id,data,updated_at) VALUES(?,?,?)').bind(id,JSON.stringify(profile),time));
  for(const row of rows)ops.push(env.DB.prepare('INSERT INTO reviews(id,expert_id,material,scores,comments,extra,submitted_at,watched) VALUES(?,?,?,?,?,?,?,1)').bind(crypto.randomUUID(),id,row.material,JSON.stringify(row.scores),JSON.stringify(row.comments),row.extra,time));
  ops.push(env.DB.prepare('INSERT INTO submissions(expert_id,submitted_at,snapshot,is_current) VALUES(?,?,?,1)').bind(id,time,JSON.stringify({profile,reviews:rows})));
- try{await env.DB.batch(ops);return reply({ok:true,label,submittedAt:time})}catch(error){if(/unique|duplicate key|23505/i.test(String(error)))continue;throw error}
+ try{await env.DB.batch(ops);return reply({ok:true,label,submittedAt:time})}catch(error){if(/unique|duplicate key|23505|division by zero/i.test(String(error)))continue;throw error}
  }
  return reply({error:'提交人数较多，请稍后再次提交；当前页面内容仍保留'},409)
  }
